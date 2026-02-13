@@ -31,12 +31,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to read body", http.StatusInternalServerError)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	// If GET request, return Agent Card directly
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(s.card)
+		if err := json.NewEncoder(w).Encode(s.card); err != nil {
+			// Best effort log
+			fmt.Printf("Encode error: %v\n", err)
+		}
 		return
 	}
 
@@ -56,7 +59,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Default to card info or error?
 		// Usually /a2a endpoint handles JSON-RPC. If GET, maybe return card?
 		if r.Method == http.MethodGet {
-			json.NewEncoder(w).Encode(s.card)
+			if err := json.NewEncoder(w).Encode(s.card); err != nil {
+				fmt.Printf("Encode error: %v\n", err)
+			}
 			return
 		}
 		http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
@@ -102,7 +107,9 @@ func (s *Server) handleSend(w http.ResponseWriter, rpcReq models.JSONRPCRequest,
 	}
 	
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		fmt.Printf("Encode error: %v\n", err)
+	}
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, rpcReq models.JSONRPCRequest, body []byte) {
@@ -124,7 +131,7 @@ func (s *Server) handleStream(w http.ResponseWriter, rpcReq models.JSONRPCReques
 	}
 	if err := json.Unmarshal(body, &specificReq); err != nil {
 		// In streaming, we might send an error event? Or just close.
-		fmt.Fprintf(w, "data: {\"error\": \"Invalid Params\"}\n\n")
+		_, _ = fmt.Fprintf(w, "data: {\"error\": \"Invalid Params\"}\n\n")
 		return
 	}
 
@@ -152,7 +159,7 @@ func (s *Server) handleStream(w http.ResponseWriter, rpcReq models.JSONRPCReques
 		// json.Unmarshal([]byte(line), &streamResp)
 		// So it is NDJSON!
 		
-		fmt.Fprintf(w, "%s\n", data)
+		_, _ = fmt.Fprintf(w, "%s\n", data)
 		flusher.Flush()
 	}
 
@@ -174,6 +181,6 @@ func (s *Server) handleStream(w http.ResponseWriter, rpcReq models.JSONRPCReques
 		Result: finalEvent,
 	}
 	data, _ := json.Marshal(resp)
-	fmt.Fprintf(w, "%s\n", data)
+	_, _ = fmt.Fprintf(w, "%s\n", data)
 	flusher.Flush()
 }

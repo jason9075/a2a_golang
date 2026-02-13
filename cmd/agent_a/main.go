@@ -65,10 +65,13 @@ func sendA2AMessage(text string) {
 		fmt.Printf("錯誤: %v\n", err)
 		panic(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var rpcResp models.JSONRPCResponse
-	json.NewDecoder(resp.Body).Decode(&rpcResp)
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		fmt.Printf("Decode error: %v\n", err)
+		return
+	}
 
 	// 從 Metadata 中抓取我們剛才塞的回應
 	if res, ok := rpcResp.Result.(map[string]interface{}); ok {
@@ -105,7 +108,7 @@ func streamA2AMessage(text string) {
 		fmt.Printf("錯誤: %v\n", err)
 		panic(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	fmt.Println(">>> 正在接收即時進度更新 (SSE)...")
 	reader := bufio.NewReader(resp.Body)
@@ -129,6 +132,7 @@ func streamA2AMessage(text string) {
 				if _, ok := update["status"].(map[string]interface{}); ok {
 					if update["final"] != true {
 						// 這裡不頻繁印出狀態，以免打斷打字機
+						_ = 0 // No-op to satisfy staticcheck
 					}
 				}
 				
