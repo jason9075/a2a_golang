@@ -9,7 +9,7 @@ import (
 )
 
 // ComplianceAgent (Agent C)
-func NewComplianceAgent() *server.Server {
+func NewComplianceAgent() *server.A2AServer {
 	card := models.AgentCard{
 		Name:        "ComplianceOfficer",
 		Description: models.StringPtr("稽核專員，負責審查最終報表是否合規"),
@@ -23,7 +23,7 @@ func NewComplianceAgent() *server.Server {
 		},
 	}
 
-	handler := func(task *models.Task, msg *models.Message, update server.TaskUpdateFunc) (*models.Task, error) {
+	handler := func(task *models.Task, msg *models.Message, update func(any)) (*models.Task, error) {
 		text := ""
 		if len(msg.Parts) > 0 && msg.Parts[0].Text != nil {
 			text = *msg.Parts[0].Text

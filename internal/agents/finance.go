@@ -9,7 +9,7 @@ import (
 )
 
 // FinanceAgent (Agent B)
-func NewFinanceAgent() *server.Server {
+func NewFinanceAgent() *server.A2AServer {
 	card := models.AgentCard{
 		Name:        "FinanceTravelExpert",
 		Description: models.StringPtr("專門處理公司差旅預算與訂票的財務助理"),
@@ -24,7 +24,7 @@ func NewFinanceAgent() *server.Server {
 		},
 	}
 
-	handler := func(task *models.Task, msg *models.Message, update server.TaskUpdateFunc) (*models.Task, error) {
+	handler := func(task *models.Task, msg *models.Message, update func(any)) (*models.Task, error) {
 		text := ""
 		if len(msg.Parts) > 0 && msg.Parts[0].Text != nil {
 			text = *msg.Parts[0].Text

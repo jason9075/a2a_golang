@@ -58,6 +58,8 @@ just run-a
 
 ### 📊 協作時序圖 (PlantUML)
 
+![Sequence Diagram](imgs/sequence.png)
+
 ```plantuml
 @startuml
 skinparam responseMessageBelowArrow true
@@ -102,6 +104,46 @@ deactivate AgentC
 
 AgentA -> User: "任務完成，報表已核准"
 deactivate AgentA
+
+@enduml
+```
+
+### 🏗️ Agent 部署架構圖 (PlantUML)
+
+![Architecture Diagram](imgs/arch.png)
+
+```plantuml
+@startuml
+skinparam componentStyle uml2
+
+package "Client Side" {
+    component [Agent A\n(Assistant CLI)] as AgentA
+}
+
+package "Server Side (Host: localhost)" {
+    node "Go Server Process (:8080)" {
+        [HTTP Router] as Router
+        
+        frame "Agent B (Finance)" {
+            [Finance Logic] as Finance
+            [Data: Policies]
+        }
+        
+        frame "Agent C (Compliance)" {
+            [Audit Logic] as Audit
+            [Data: Budget Rules]
+        }
+    }
+}
+
+AgentA ..> Router : HTTP POST / JSON-RPC
+Router --> Finance : /agent/finance
+Router --> Audit : /agent/compliance
+
+note right of AgentA
+  Orchestrator
+  (Manages Flow)
+end note
 
 @enduml
 ```
