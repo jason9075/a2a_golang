@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: cachix/install-nix-action@v25
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+
+    - name: Run Unit Tests
+      run: nix develop --command just test
+
+    - name: Run Integration Demo
+      run: |
+        nix develop --command bash -c "
+          # Start Agent B in background
+          echo '🚀 Starting Agent B...'
+          go run cmd/agent_b/main.go &
+          AGENT_B_PID=\$!
+          
+          # Wait for server to be ready
+          echo 'Waiting for Agent B to be ready...'
+          sleep 5
+          
+          # Run Agent A (Client)
+          echo '🚀 Starting Agent A...'
+          if ! go run cmd/agent_a/main.go; then
+            echo '❌ Agent A failed!'
+            kill \$AGENT_B_PID
+            exit 1
+          fi
+          
+          echo '✅ Integration test passed!'
+          kill \$AGENT_B_PID
+        "
