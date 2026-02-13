@@ -14,15 +14,15 @@ lint:
 
 # Build binaries
 build:
-    @echo "Building Agent A..."
+    @echo "Building Agent A (Client)..."
     go build -o bin/agent_a ./cmd/agent_a
-    @echo "Building Agent B..."
-    go build -o bin/agent_b ./cmd/agent_b
+    @echo "Building Agent B & C (Server)..."
+    go build -o bin/server ./cmd/server
 
-# Run Agent B (Finance Server)
-run-b:
-    @echo "🚀 Agent B (Finance Server) starting..."
-    go run ./cmd/agent_b/main.go
+# Run Agent Server (B+C)
+run-server:
+    @echo "🚀 A2A Server (B+C) starting..."
+    go run ./cmd/server/main.go
 
 # Run Agent A (Assistant Client)
 run-a:

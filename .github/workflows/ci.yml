@@ -22,23 +22,23 @@ jobs:
     - name: Run Integration Demo
       run: |
         nix develop --command bash -c "
-          # Start Agent B in background
-          echo '🚀 Starting Agent B...'
-          go run cmd/agent_b/main.go &
-          AGENT_B_PID=\$!
+          # Start Agent Server (B+C) in background
+          echo '🚀 Starting Agent Server...'
+          go run cmd/server/main.go &
+          SERVER_PID=\$!
           
           # Wait for server to be ready
-          echo 'Waiting for Agent B to be ready...'
+          echo 'Waiting for Server to be ready...'
           sleep 5
           
           # Run Agent A (Client)
           echo '🚀 Starting Agent A...'
           if ! go run cmd/agent_a/main.go; then
             echo '❌ Agent A failed!'
-            kill \$AGENT_B_PID
+            kill \$SERVER_PID
             exit 1
           fi
           
           echo '✅ Integration test passed!'
-          kill \$AGENT_B_PID
+          kill \$SERVER_PID
         "

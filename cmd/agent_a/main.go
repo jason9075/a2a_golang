@@ -16,6 +16,8 @@ func main() {
 	fmt.Println("🏢 [公司差旅展示] Agent A (助理) 正在啟動...")
 	time.Sleep(1 * time.Second)
 
+	// Step 1: 與 Agent B (財務) 互動
+	fmt.Println("\n=== Step 1: 與 Agent B (財務) 協調行程 ===")
 	rounds := []string{
 		"老闆下週一要去台北出差三天，預算一天 5,000 元，請推薦飯店。",
 		"訂君悅。另外請幫忙訂週一早上 9 點從台中出發的高鐵。",
@@ -23,21 +25,30 @@ func main() {
 		"參加 Google A2A 技術研討會。",
 	}
 
-	// 模擬前四回合的標準 A2A 對話
 	for i, cmd := range rounds {
 		fmt.Printf("\n--- 第 %d 回合 ---\n", i+1)
-		sendA2AMessage(cmd)
-		time.Sleep(2 * time.Second) // 留一點時間讓老闆看 Log
+		sendA2AMessage("http://localhost:8080/agent/finance", cmd)
+		time.Sleep(1 * time.Second)
 	}
 
-	// 第五回合：展示 SSE 串流功能
+	// Step 2: 取得 Agent B 的最終報告 (SSE)
 	fmt.Printf("\n--- 第 5 回合 (SSE 串流展示) ---\n")
 	fmt.Println("PA: 請產出最終行程表與報帳單。")
-	streamA2AMessage("產出最終行程表與報帳單。")
+	finalReport := streamA2AMessage("http://localhost:8080/agent/finance", "產出最終行程表與報帳單。")
+	
+	// Step 3: 送交 Agent C (稽核) 審核
+	fmt.Println("\n=== Step 2: 送交 Agent C (稽核) 審核 ===")
+	time.Sleep(1 * time.Second)
+	
+	fmt.Printf("PA 發送報告給稽核: %s\n", finalReport)
+	
+	// 這裡我們直接把 Agent B 的輸出丟給 Agent C
+	// 在實際應用中，可能需要稍微整理格式，但 Agent C 的邏輯是 regex 金額，所以沒問題
+	sendA2AMessage("http://localhost:8080/agent/compliance", "請審核以下報表: " + finalReport)
 }
 
-func sendA2AMessage(text string) {
-	fmt.Printf("PA 發送指令: %s\n", text)
+func sendA2AMessage(endpoint, text string) {
+	fmt.Printf("PA -> %s: %s\n", endpoint, text)
 
 	reqID := fmt.Sprintf("req-%d", time.Now().Unix())
 	params := models.TaskSendParams{
@@ -60,7 +71,7 @@ func sendA2AMessage(text string) {
 	}
 
 	body, _ := json.Marshal(rpcReq)
-	resp, err := http.Post("http://localhost:8080/a2a", "application/json", bytes.NewBuffer(body))
+	resp, err := http.Post(endpoint, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		fmt.Printf("錯誤: %v\n", err)
 		panic(err)
@@ -76,12 +87,13 @@ func sendA2AMessage(text string) {
 	// 從 Metadata 中抓取我們剛才塞的回應
 	if res, ok := rpcResp.Result.(map[string]interface{}); ok {
 		if meta, ok := res["metadata"].(map[string]interface{}); ok {
-			fmt.Printf("TF 回應: %v\n", meta["reply"])
+			fmt.Printf("RESPONSE: %v\n", meta["reply"])
 		}
 	}
 }
 
-func streamA2AMessage(text string) {
+// 修改後的回傳值：返回最終累積的字串，供下一步驟使用
+func streamA2AMessage(endpoint, text string) string {
 	reqID := "req-stream-999"
 	params := models.TaskSendParams{
 		ID: "travel-task-123",
@@ -98,12 +110,12 @@ func streamA2AMessage(text string) {
 			JSONRPC: "2.0",
 			JSONRPCMessageIdentifier: models.JSONRPCMessageIdentifier{ID: reqID},
 		},
-		Method: "message/stream", // 使用串流方法
+		Method: "message/stream",
 		Params: params,
 	}
 
 	body, _ := json.Marshal(rpcReq)
-	resp, err := http.Post("http://localhost:8080/a2a", "application/json", bytes.NewBuffer(body))
+	resp, err := http.Post(endpoint, "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		fmt.Printf("錯誤: %v\n", err)
 		panic(err)
@@ -111,6 +123,9 @@ func streamA2AMessage(text string) {
 	defer func() { _ = resp.Body.Close() }()
 
 	fmt.Println(">>> 正在接收即時進度更新 (SSE)...")
+	
+	fullText := ""
+	
 	reader := bufio.NewReader(resp.Body)
 	for {
 		line, err := reader.ReadString('\n')
@@ -118,7 +133,7 @@ func streamA2AMessage(text string) {
 			if err == io.EOF {
 				break
 			}
-			return
+			return ""
 		}
 		
 		if strings.TrimSpace(line) == "" {
@@ -128,30 +143,31 @@ func streamA2AMessage(text string) {
 		var streamResp models.SendTaskStreamingResponse
 		if err := json.Unmarshal([]byte(line), &streamResp); err == nil {
 			if update, ok := streamResp.Result.(map[string]interface{}); ok {
-				// 處理 1: 狀態更新 (只在狀態改變時印出，並換行)
+				// 處理 1: 狀態更新
 				if _, ok := update["status"].(map[string]interface{}); ok {
 					if update["final"] != true {
-						// 這裡不頻繁印出狀態，以免打斷打字機
-						_ = 0 // No-op to satisfy staticcheck
+						_ = 0
 					}
 				}
 				
-				// 處理 2: 文字碎片 (打字機效果)
+				// 處理 2: 文字碎片
 				if artifact, ok := update["artifact"].(map[string]interface{}); ok {
 					if parts, ok := artifact["parts"].([]interface{}); ok && len(parts) > 0 {
 						if part, ok := parts[0].(map[string]interface{}); ok {
 							if txt, ok := part["text"].(string); ok {
-								fmt.Print(txt) 
+								fmt.Print(txt)
+								fullText += txt
 							}
 						}
 					}
 				}
 
 				if update["final"] == true {
-					fmt.Println("\n\n✅ 任務完整結束，報告已由財務專員產出！")
+					fmt.Println("\n\n✅ 任務完整結束！")
 					break
 				}
 			}
 		}
 	}
+	return fullText
 }
