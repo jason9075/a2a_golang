@@ -1,186 +1,362 @@
 package server
 
 import (
-	"a2a/models"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"sync"
+
+	"a2a/models"
 )
 
-type TaskUpdateFunc func(event interface{})
+// TaskHandler is a function type that handles task processing
+// Added update func(any) to support streaming updates from within the handler
+type TaskHandler func(task *models.Task, message *models.Message, update func(any)) (*models.Task, error)
 
-type HandlerFunc func(task *models.Task, msg *models.Message, update TaskUpdateFunc) (*models.Task, error)
-
-type Server struct {
-	card    models.AgentCard
-	handler HandlerFunc
+// A2AServer represents an A2A server instance
+type A2AServer struct {
+	agentCard   models.AgentCard
+	handler     TaskHandler
+	port        int
+	basePath    string
+	taskStore   map[string]*models.Task
+	taskHistory map[string][]*models.Message
+	mu          sync.RWMutex
 }
 
-func NewA2AServer(card models.AgentCard, handler HandlerFunc) *Server {
-	return &Server{
-		card:    card,
-		handler: handler,
+// NewA2AServer creates a new A2A server instance
+// Updated signature to match the new TaskHandler
+func NewA2AServer(agentCard models.AgentCard, handler TaskHandler) *A2AServer {
+	return &A2AServer{
+		agentCard:   agentCard,
+		handler:     handler,
+		taskStore:   make(map[string]*models.Task),
+		taskHistory: make(map[string][]*models.Message),
 	}
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Read body first, as we might need it for debugging or later use
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read body", http.StatusInternalServerError)
-		return
-	}
-	defer func() { _ = r.Body.Close() }()
+// Start starts the A2A server
+func (s *A2AServer) Start() error {
+	mux := http.NewServeMux()
+	mux.Handle(s.basePath, s)
+	return http.ListenAndServe(fmt.Sprintf(":%d", s.port), mux)
+}
 
-	// If GET request, return Agent Card directly
+// ServeHTTP implements the http.Handler interface
+func (s *A2AServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Handle GET request to return Agent Card
 	if r.Method == http.MethodGet {
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(s.card); err != nil {
-			// Best effort log
-			fmt.Printf("Encode error: %v\n", err)
+		if err := json.NewEncoder(w).Encode(s.agentCard); err != nil {
+			fmt.Printf("Error encoding agent card: %v\n", err)
 		}
 		return
 	}
 
-	var rpcReq models.JSONRPCRequest
-	if err := json.Unmarshal(body, &rpcReq); err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Dispatch based on Method
-	switch rpcReq.Method {
+	var req models.JSONRPCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Return JSON-RPC error response with ErrorCodeInvalidRequest
+		response := models.JSONRPCResponse{
+			JSONRPCMessage: models.JSONRPCMessage{
+				JSONRPC: "2.0",
+			},
+			Error: &models.JSONRPCError{
+				Code:    int(models.ErrorCodeInvalidRequest),
+				Message: "Invalid JSON: " + err.Error(),
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			fmt.Printf("Error encoding response: %v\n", err)
+		}
+		return
+	}
+
+	parseTaskSendParams := func(req *models.JSONRPCRequest) (*models.TaskSendParams, error) {
+		var params models.TaskSendParams
+		paramsBytes, err := json.Marshal(req.Params)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(paramsBytes, &params); err != nil {
+			return nil, err
+		}
+		return &params, nil
+	}
+
+	switch req.Method {
 	case "message/send":
-		s.handleSend(w, rpcReq, body)
-	case "message/stream":
-		s.handleStream(w, rpcReq, body)
-	default:
-		// Default to card info or error?
-		// Usually /a2a endpoint handles JSON-RPC. If GET, maybe return card?
-		if r.Method == http.MethodGet {
-			if err := json.NewEncoder(w).Encode(s.card); err != nil {
-				fmt.Printf("Encode error: %v\n", err)
-			}
+		_, err := parseTaskSendParams(&req)
+		if err != nil {
+			s.sendError(w, req.ID.(string), models.ErrorCodeInvalidRequest, "Invalid parameters")
 			return
 		}
-		http.Error(w, "Method not supported", http.StatusMethodNotAllowed)
+		s.handleTaskSend(w, &req, req.ID.(string))
+	case "message/stream":
+		params, err := parseTaskSendParams(&req)
+		if err != nil {
+			s.sendError(w, req.ID.(string), models.ErrorCodeInvalidRequest, "Invalid parameters")
+			return
+		}
+		s.handleStreamingTask(w, r, *params)
+	case "tasks/get":
+		s.handleTaskGet(w, &req, req.ID.(string))
+	case "tasks/cancel":
+		s.handleTaskCancel(w, &req, req.ID.(string))
+	default:
+		s.sendError(w, req.ID.(string), models.ErrorCodeMethodNotFound, "Method not found")
 	}
 }
 
-func (s *Server) handleSend(w http.ResponseWriter, rpcReq models.JSONRPCRequest, body []byte) {
-	// Re-decode params specifically as TaskSendParams
-	// Since rpcReq.Params is interface{}, and we know the structure for "message/send"
-	// A cleaner way is to unmarshal directly into a struct that matches the method,
-	// but here we just re-unmarshal or use map.
-	// Let's use map/interface casting or re-unmarshal for safety.
-	
-	// Better: define a struct for the request with known Params type
-	var specificReq struct {
-		Params models.TaskSendParams `json:"params"`
-	}
-	if err := json.Unmarshal(body, &specificReq); err != nil {
-		http.Error(w, "Invalid Params", http.StatusBadRequest)
-		return
-	}
-
-	task := &models.Task{
-		ID:     specificReq.Params.ID,
-		Status: models.TaskStatus{State: models.TaskStateWorking},
-	}
-	msg := &specificReq.Params.Message
-
-	// Dummy update function
-	update := func(event interface{}) {}
-
-	resultTask, err := s.handler(task, msg, update)
+// handleTaskSend handles the message/send method
+func (s *A2AServer) handleTaskSend(w http.ResponseWriter, req *models.JSONRPCRequest, id string) {
+	var params models.TaskSendParams
+	paramsBytes, err := json.Marshal(req.Params)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
+		return
+	}
+	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
 		return
 	}
 
-	// Respond with JSONRPCResponse
-	resp := models.JSONRPCResponse{
-		JSONRPC: "2.0",
-		ID:      rpcReq.JSONRPCMessageIdentifier.ID, // Extract ID string
-		Result:  resultTask,
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Create new task
+	task := &models.Task{
+		ID: params.ID,
+		Status: models.TaskStatus{
+			State: models.TaskStateWorking,
+		},
 	}
-	
+
+	// Process task
+	// Pass dummy update function
+	updatedTask, err := s.handler(task, &params.Message, func(event any) {})
+	if err != nil {
+		s.sendError(w, id, models.ErrorCodeInternalError, err.Error())
+		return
+	}
+
+	// Store task and history
+	s.taskStore[task.ID] = updatedTask
+	s.taskHistory[task.ID] = append(s.taskHistory[task.ID], &params.Message)
+
+	// Send response
+	s.sendResponse(w, id, updatedTask)
+}
+
+// handleTaskGet handles the tasks/get method
+func (s *A2AServer) handleTaskGet(w http.ResponseWriter, req *models.JSONRPCRequest, id string) {
+	var params models.TaskQueryParams
+	paramsBytes, err := json.Marshal(req.Params)
+	if err != nil {
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
+		return
+	}
+	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
+		return
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	task, exists := s.taskStore[params.ID]
+	if !exists {
+		s.sendError(w, id, models.ErrorCodeTaskNotFound, "Task not found")
+		return
+	}
+
+	s.sendResponse(w, id, task)
+}
+
+// handleTaskCancel handles the tasks/cancel method
+func (s *A2AServer) handleTaskCancel(w http.ResponseWriter, req *models.JSONRPCRequest, id string) {
+	var params models.TaskIDParams
+	paramsBytes, err := json.Marshal(req.Params)
+	if err != nil {
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
+		return
+	}
+	if err := json.Unmarshal(paramsBytes, &params); err != nil {
+		s.sendError(w, id, models.ErrorCodeInvalidRequest, "Invalid parameters")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	task, exists := s.taskStore[params.ID]
+	if !exists {
+		s.sendError(w, id, models.ErrorCodeTaskNotFound, "Task not found")
+		return
+	}
+
+	// Update task status to canceled
+	task.Status.State = models.TaskStateCanceled
+	s.taskStore[params.ID] = task
+
+	s.sendResponse(w, id, task)
+}
+
+// sendResponse sends a JSON-RPC response
+func (s *A2AServer) sendResponse(w http.ResponseWriter, id string, result interface{}) {
+	response := models.JSONRPCResponse{
+		JSONRPCMessage: models.JSONRPCMessage{
+			JSONRPC: "2.0",
+			JSONRPCMessageIdentifier: models.JSONRPCMessageIdentifier{
+				ID: id,
+			},
+		},
+		Result: result,
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		fmt.Printf("Encode error: %v\n", err)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf("Error encoding response: %v\n", err)
 	}
 }
 
-func (s *Server) handleStream(w http.ResponseWriter, rpcReq models.JSONRPCRequest, body []byte) {
-	// Validate streaming support
+// sendError sends a JSON-RPC error response
+func (s *A2AServer) sendError(w http.ResponseWriter, id string, code models.ErrorCode, message string) {
+	response := models.JSONRPCResponse{
+		JSONRPCMessage: models.JSONRPCMessage{
+			JSONRPC: "2.0",
+			JSONRPCMessageIdentifier: models.JSONRPCMessageIdentifier{
+				ID: id,
+			},
+		},
+		Error: &models.JSONRPCError{
+			Code:    int(code),
+			Message: message,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf("Error encoding response: %v\n", err)
+	}
+}
+
+func (s *A2AServer) handleStreamingTask(w http.ResponseWriter, r *http.Request, params models.TaskSendParams) {
+	// Set headers for SSE
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Check if response writer supports flushing
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	// Start stream
-	
-	// Parse params
-	var specificReq struct {
-		Params models.TaskSendParams `json:"params"`
-	}
-	if err := json.Unmarshal(body, &specificReq); err != nil {
-		// In streaming, we might send an error event? Or just close.
-		_, _ = fmt.Fprintf(w, "data: {\"error\": \"Invalid Params\"}\n\n")
-		return
-	}
+	// Create a channel to receive task updates
+	updates := make(chan any)
 
-	task := &models.Task{
-		ID:     specificReq.Params.ID,
-		Status: models.TaskStatus{State: models.TaskStateWorking},
-	}
-	msg := &specificReq.Params.Message
+	// Create a done channel to signal when the goroutine is finished
+	done := make(chan struct{})
 
-	// Update function
-	update := func(event interface{}) {
-		// Wrap event in streaming response structure
-		// The client expects SendTaskStreamingResponse
-		resp := models.SendTaskStreamingResponse{
-			Result: event,
+	// Start task processing in a goroutine
+	go func() {
+		defer func() {
+			close(updates) // Close updates channel when goroutine exits
+			close(done)    // Signal that goroutine is done
+		}()
+
+		// Recover from any panics to ensure channels are closed
+		defer func() {
+			if r := recover(); r != nil {
+				// Log the panic (you might want to use a proper logger)
+				fmt.Printf("Recovered from panic in streaming task: %v\n", r)
+			}
+		}()
+
+		s.mu.Lock()
+		// Create new task
+		task := &models.Task{
+			ID: params.ID,
+			Status: models.TaskStatus{
+				State: models.TaskStateWorking,
+			},
 		}
-		data, _ := json.Marshal(resp)
-		// SSE format: "data: <json>\n\n"? Or just raw JSON per line?
-		// Client agent_a reads line by line and unmarshals.
-		// Standard SSE uses "data: ...\n\n".
-		// But agent_a code uses: `json.Unmarshal([]byte(line), &streamResp)`
-		// This implies raw JSON lines (NDJSON), not standard SSE "data:" prefix.
-		// Let's check agent_a loop:
-		// line, err := reader.ReadString('\n')
-		// json.Unmarshal([]byte(line), &streamResp)
-		// So it is NDJSON!
-		
-		_, _ = fmt.Fprintf(w, "%s\n", data)
-		flusher.Flush()
-	}
+		s.taskStore[task.ID] = task
+		s.taskHistory[task.ID] = append(s.taskHistory[task.ID], &params.Message)
+		s.mu.Unlock()
 
-	// Call handler
-	resultTask, err := s.handler(task, msg, update)
-	if err != nil {
-		// Log error?
-		return
+		// Send initial status update
+		updates <- models.TaskStatusUpdateEvent{
+			ID:     task.ID,
+			Status: task.Status,
+			Final:  boolPtr(false),
+		}
+
+		// Define the update callback
+		updateFunc := func(event any) {
+			updates <- event
+		}
+
+		// Process task using the handler field
+		updatedTask, err := s.handler(task, &params.Message, updateFunc)
+		if err != nil {
+			// Send error status update
+			updates <- models.TaskStatusUpdateEvent{
+				ID: task.ID,
+				Status: models.TaskStatus{
+					State: models.TaskStateFailed,
+				},
+				Final: boolPtr(true),
+			}
+			return
+		}
+
+		// Update task in store
+		s.mu.Lock()
+		s.taskStore[task.ID] = updatedTask
+		s.mu.Unlock()
+
+		// Send final status update
+		updates <- models.TaskStatusUpdateEvent{
+			ID:     updatedTask.ID,
+			Status: updatedTask.Status,
+			Final:  boolPtr(true),
+		}
+	}()
+
+	// Stream updates to the client
+	encoder := json.NewEncoder(w)
+	for {
+		select {
+		case update, ok := <-updates:
+			if !ok {
+				// Channel closed, we're done
+				return
+			}
+			resp := models.SendTaskStreamingResponse{
+				Result: update,
+				Error:  nil,
+			}
+
+			if err := encoder.Encode(resp); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-r.Context().Done():
+			// Client disconnected
+			return
+		case <-done:
+			// Goroutine finished
+			return
+		}
 	}
-	
-	// Send final completion event
-	final := true
-	finalEvent := models.TaskArtifactUpdateEvent{
-		ID:    resultTask.ID,
-		Final: &final,
-	}
-	
-	resp := models.SendTaskStreamingResponse{
-		Result: finalEvent,
-	}
-	data, _ := json.Marshal(resp)
-	_, _ = fmt.Fprintf(w, "%s\n", data)
-	flusher.Flush()
 }

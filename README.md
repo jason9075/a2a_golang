@@ -56,6 +56,56 @@ just run-a
 1.  **送審**：PA 將 B 產生的報表送給 C。
 2.  **裁決**：C 判斷總金額 ($15,500) 小於預算 ($20,000)，回傳 **✅ [核准]**。
 
+### 📊 協作時序圖 (PlantUML)
+
+```plantuml
+@startuml
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 150
+
+actor User as "User (老闆)"
+participant AgentA as "Agent A\n(助理 Client)"
+box "A2A Server (Port 8080)" #LightBlue
+    participant AgentB as "Agent B\n(財務 /agent/finance)"
+    participant AgentC as "Agent C\n(稽核 /agent/compliance)"
+end box
+
+== Phase 1: 差旅協商 & 訂票 ==
+User -> AgentA: "下週一要去台北..."
+activate AgentA
+
+AgentA -> AgentB: POST message/send\n(詢問飯店)
+activate AgentB
+AgentB --> AgentA: "推薦君悅、寒舍..."
+deactivate AgentB
+
+User -> AgentA: "訂君悅"
+AgentA -> AgentB: POST message/send\n(確認訂房)
+activate AgentB
+AgentB --> AgentA: "已確認，需報帳事由"
+deactivate AgentB
+
+== Phase 2: 產生報表 (SSE) ==
+User -> AgentA: "產出報表"
+AgentA -> AgentB: POST message/stream
+activate AgentB
+AgentB -->> AgentA: SSE Stream (打字機效果...)
+AgentB -->> AgentA: Final Artifact (完整報表)
+deactivate AgentB
+
+== Phase 3: 合規審查 (Audit) ==
+AgentA -> AgentC: POST message/send\n(附上完整報表)
+activate AgentC
+note right of AgentC: 檢查金額\n是否 < $20,000
+AgentC --> AgentA: "✅ 核准 (Comp-OK)"
+deactivate AgentC
+
+AgentA -> User: "任務完成，報表已核准"
+deactivate AgentA
+
+@enduml
+```
+
 ---
 
 ## 🛠 技術架構
